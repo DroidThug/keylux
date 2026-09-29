@@ -69,6 +69,8 @@ pub struct Editor {
     pub status: Option<String>,
     /// Stream the composited preview to the physical keyboard while editing.
     pub live: bool,
+    pub frame_requested: bool,
+    pub nvram_result: Option<Result<(), String>>,
 
     /// Layer-stack snapshots for undo (newest last) and redo.
     undo: Vec<Vec<Layer>>,
@@ -107,6 +109,8 @@ impl Editor {
             playhead: 0.0,
             playing: false,
             dirty: false,
+            frame_requested: false,
+            nvram_result: None,
             file_name,
             status: None,
             live: false,
@@ -427,7 +431,23 @@ fn top_bar(ui: &mut egui::Ui, ed: &mut Editor, anim_dir: &std::path::Path) {
                 "Stream the composited preview to the real keyboard as you edit.\n\
                  Smoothest over the cable; the 2.4 GHz link updates slowly.",
             );
+
+        if ui.button("💾 Write frame to NVRAM (permanent)").clicked() {
+            ed.frame_requested = true;
+            ed.nvram_result = None;
+        }
+
+        if ed.frame_requested {
+            ui.colored_label(pal.text_muted, "Writing...");
+        } else if matches!(ed.nvram_result, Some(Ok(()))) {
+            ui.colored_label(pal.success, "Saved");
+        }
     });
+    if let Some(Err(msg)) = &ed.nvram_result {
+        ui.horizontal(|ui| {
+            ui.colored_label(pal.danger, format!("Write to NVRAM failed: {msg}"));
+        });
+    }
 }
 
 /// The layer stack: add / reorder / blend / opacity / enable, and pick active.
