@@ -6,8 +6,6 @@
 use eframe::egui::{self, Color32};
 use std::sync::RwLock;
 
-use crate::settings::{ColorTheme, Settings};
-
 /// Use `RwLock` for blocking access to current palette
 static CURRENT: RwLock<&'static Palette> = RwLock::new(&DARK);
 
@@ -94,13 +92,6 @@ pub fn set_current(theme: crate::settings::ColorTheme) {
     *CURRENT.write().unwrap() = pal;
 }
 
-pub fn theme_switch_label(settings: &mut Settings) -> String {
-    match settings.color_theme {
-        ColorTheme::Dark => "🌘".to_string(),
-        ColorTheme::Light => "☀".to_string(),
-    }
-}
-
 impl Palette {
     /// Apply the palette to egui's global style: panel fills, selection colour,
     /// rounded widgets, and a touch more breathing room than the default.
@@ -132,11 +123,12 @@ impl Palette {
         // Enable left side of slider fill (which is disabled in light mode by default)
         v.slider_trailing_fill = true;
 
-        // Buttons
+        // Buttons and combo-box
         v.widgets.inactive.weak_bg_fill = self.surface_alt;
         v.widgets.hovered.weak_bg_fill = self.hovered_bg;
         v.widgets.active.weak_bg_fill = self.hovered_bg;
         v.widgets.noninteractive.weak_bg_fill = self.hovered_bg; // disabled buttons
+        v.widgets.open.weak_bg_fill = self.accent; // combo-box while opened
 
         // Slider dot color when interacting
         v.widgets.active.bg_fill = self.accent;

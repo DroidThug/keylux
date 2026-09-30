@@ -4,6 +4,7 @@ use eframe::egui;
 
 use aula_effects::{ParamKind, Params, Value};
 use aula_protocol::{Link, Rgb};
+use strum::IntoEnumIterator;
 
 use crate::board;
 use crate::editor::{self, Editor};
@@ -604,20 +605,27 @@ impl eframe::App for App {
                     }
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let theme_switch_label = theme::theme_switch_label(&mut self.settings);
-                    // TODO: add theme selector, not just a toggle
-                    if ui.button(theme_switch_label).clicked() {
-                        self.settings.color_theme = match self.settings.color_theme {
-                            ColorTheme::Dark => ColorTheme::Light,
-                            ColorTheme::Light => ColorTheme::Dark,
-                        };
-                        theme::set_current(self.settings.color_theme);
-                        theme::current().apply(ui.ctx());
-                        self.settings.save();
-                    }
                     let label = if running { "⏸ Pause" } else { "▶ Play" };
                     if ui.button(label).clicked() {
                         self.engine.send(Cmd::SetRunning(!running));
+                    }
+                    // Theme switcher
+                    let resp = egui::ComboBox::from_label("Theme")
+                        .selected_text(self.settings.color_theme.to_string())
+                        .show_ui(ui, |ui| {
+                            for theme in ColorTheme::iter() {
+                                ui.selectable_value(
+                                    &mut self.settings.color_theme,
+                                    theme,
+                                    theme.to_string(),
+                                );
+                            }
+                        });
+                    ui.add_space(16.0);
+                    if resp.inner == Some(()) {
+                        theme::set_current(self.settings.color_theme);
+                        theme::current().apply(ui.ctx());
+                        self.settings.save();
                     }
                 });
             });
