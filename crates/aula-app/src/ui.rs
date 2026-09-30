@@ -604,10 +604,7 @@ impl eframe::App for App {
                     }
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let theme_switch_label = match self.settings.color_theme {
-                        ColorTheme::Dark => "🌘",
-                        ColorTheme::Light => "☀",
-                    };
+                    let theme_switch_label = theme::theme_switch_label(&mut self.settings);
                     // TODO: add theme selector, not just a toggle
                     if ui.button(theme_switch_label).clicked() {
                         self.settings.color_theme = match self.settings.color_theme {

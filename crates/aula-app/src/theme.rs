@@ -94,7 +94,7 @@ pub fn set_current(theme: crate::settings::ColorTheme) {
     *CURRENT.write().unwrap() = pal;
 }
 
-pub fn theme_switch_label(settings: Settings) -> String {
+pub fn theme_switch_label(settings: &mut Settings) -> String {
     match settings.color_theme {
         ColorTheme::Dark => "🌘".to_string(),
         ColorTheme::Light => "☀".to_string(),
