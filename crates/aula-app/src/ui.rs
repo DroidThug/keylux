@@ -8,7 +8,7 @@ use aula_protocol::{Link, Rgb};
 use crate::board;
 use crate::editor::{self, Editor};
 use crate::engine::{Cmd, DeviceStatus, Engine};
-use crate::settings::{CloseAction, Settings};
+use crate::settings::{CloseAction, ColorTheme, Settings};
 use crate::theme;
 use crate::tray::{Tray, TrayAction};
 use crate::window_ctl::WindowRef;
@@ -58,9 +58,10 @@ pub struct App {
 
 impl App {
     pub fn new(cc: &eframe::CreationContext<'_>, effects_dir: std::path::PathBuf) -> Self {
+        let settings = Settings::load();
+        theme::set_current(settings.color_theme);
         theme::current().apply(&cc.egui_ctx);
         let ctx = cc.egui_ctx.clone();
-        let settings = Settings::load();
         let engine = Engine::spawn(
             effects_dir.clone(),
             settings.pinned_device(),
@@ -603,6 +604,20 @@ impl eframe::App for App {
                     }
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let theme_switch_label = match self.settings.color_theme {
+                        ColorTheme::Dark => "🌘",
+                        ColorTheme::Light => "☀",
+                    };
+                    // TODO: add theme selector, not just a toggle
+                    if ui.button(theme_switch_label).clicked() {
+                        self.settings.color_theme = match self.settings.color_theme {
+                            ColorTheme::Dark => ColorTheme::Light,
+                            ColorTheme::Light => ColorTheme::Dark,
+                        };
+                        theme::set_current(self.settings.color_theme);
+                        theme::current().apply(ui.ctx());
+                        self.settings.save();
+                    }
                     let label = if running { "⏸ Pause" } else { "▶ Play" };
                     if ui.button(label).clicked() {
                         self.engine.send(Cmd::SetRunning(!running));
