@@ -7,9 +7,9 @@
 
 use std::path::PathBuf;
 
+use crate::settings::ColorTheme::Dark;
 use aula_protocol::DeviceId;
 use serde::{Deserialize, Serialize};
-use crate::settings::ColorTheme::Dark;
 
 /// What the window's close button does.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]

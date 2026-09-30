@@ -3,10 +3,10 @@
 //! made a coherent look impossible. Everything visual now names a token here,
 //! so the whole app can be reskinned in one place.
 
-use std::sync::RwLock;
 use eframe::egui::{self, Color32};
+use std::sync::RwLock;
 
-use crate::settings::{Settings, ColorTheme};
+use crate::settings::{ColorTheme, Settings};
 
 /// Use `RwLock` for blocking access to current palette
 static CURRENT: RwLock<&'static Palette> = RwLock::new(&DARK);
@@ -140,7 +140,7 @@ impl Palette {
 
         // Slider dot color when interacting
         v.widgets.active.bg_fill = self.accent;
-        
+
         // Separators color
         v.widgets.noninteractive.bg_stroke = egui::Stroke::new(1.0_f32, self.key_stroke);
 
