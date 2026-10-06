@@ -82,10 +82,13 @@ pub fn draw_board(ui: &egui::Ui, rect: egui::Rect, layout: &[KeyPos], frame: &Fr
         painter.rect_filled(key_rect, 2.0, fill);
         painter.rect_stroke(key_rect, 2.0, egui::Stroke::new(0.5_f32, pal.key_stroke));
 
-        painter.text(
+        // SDK labels are often "Key: A". Keep the full label in the layout
+        // for scripts, and clip long legends so they cannot cover nearby keys.
+        let label = k.name.strip_prefix("Key: ").unwrap_or(&k.name);
+        painter.with_clip_rect(key_rect.shrink(1.0)).text(
             key_rect.center(),
             egui::Align2::CENTER_CENTER,
-            k.name,
+            label,
             egui::FontId::proportional(10.0),
             key_label_color(c, pal.text_muted),
         );

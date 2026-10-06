@@ -3,15 +3,17 @@
     windows_subsystem = "windows"
 )]
 
-//! `keylux` — desktop control for AULA keyboard lighting.
+//! `keylux` — desktop keyboard lighting through native AULA and OpenRGB drivers.
 //!
 //! Runs the GUI by default. Any argument drops to the CLI, which is handy for
 //! scripting and for hardware checks without a window.
 
+mod backend;
 mod board;
 mod cli;
 mod editor;
 mod engine;
+mod profiles;
 mod settings;
 mod theme;
 mod tray;
