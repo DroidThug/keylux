@@ -303,7 +303,9 @@ impl ForegroundDetector {
 #[derive(Debug, PartialEq, Eq)]
 pub enum Foreground {
     /// Retain the current lighting while the user edits profiles in keylux.
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
     OwnWindow,
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
     Application(String),
     /// Focus transitions and inaccessible processes should not flash the default.
     Unavailable,

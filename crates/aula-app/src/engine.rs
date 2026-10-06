@@ -513,8 +513,11 @@ fn run(
                 None
             } else {
                 match foreground_detector.poll() {
+                    #[cfg(any(target_os = "windows", target_os = "linux"))]
                     Foreground::Application(path) => Some(path),
-                    Foreground::OwnWindow | Foreground::Unavailable => None,
+                    #[cfg(any(target_os = "windows", target_os = "linux"))]
+                    Foreground::OwnWindow => None,
+                    Foreground::Unavailable => None,
                 }
             };
             if restore_default || foreground.is_some() {
