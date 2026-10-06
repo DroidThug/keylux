@@ -97,6 +97,13 @@ impl Palette {
     /// rounded widgets, and a touch more breathing room than the default.
     pub fn apply(&self, ctx: &egui::Context) {
         let mut style = (*ctx.style()).clone();
+        // Reset widget strokes and fills too: changing dark_mode alone leaves
+        // the previous theme's text, popup and checkbox colours in place.
+        style.visuals = if self.dark_mode {
+            egui::Visuals::dark()
+        } else {
+            egui::Visuals::light()
+        };
         let v = &mut style.visuals;
 
         v.dark_mode = self.dark_mode;
@@ -140,5 +147,35 @@ impl Palette {
         style.spacing.button_padding = egui::vec2(8.0, 4.0);
 
         ctx.set_style(style);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn switching_themes_resets_widget_and_popup_visuals() {
+        let ctx = egui::Context::default();
+        for palette in [&LIGHT, &DARK, &LIGHT] {
+            palette.apply(&ctx);
+            let style = ctx.style();
+            let expected = if palette.dark_mode {
+                egui::Visuals::dark()
+            } else {
+                egui::Visuals::light()
+            };
+            assert_eq!(style.visuals.dark_mode, palette.dark_mode);
+            assert_eq!(style.visuals.override_text_color, Some(palette.text));
+            assert_eq!(style.visuals.window_stroke, expected.window_stroke);
+            assert_eq!(
+                style.visuals.widgets.inactive.fg_stroke,
+                expected.widgets.inactive.fg_stroke
+            );
+            assert_eq!(
+                style.visuals.widgets.hovered.bg_stroke,
+                expected.widgets.hovered.bg_stroke
+            );
+        }
     }
 }

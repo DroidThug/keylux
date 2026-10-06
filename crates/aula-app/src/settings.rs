@@ -175,6 +175,7 @@ mod tests {
         assert_eq!(back.max_fps, 12);
         assert_eq!(back.pinned_device(), "3554:fa09".parse().ok());
         assert_eq!(back.allow_list().len(), 1);
+        assert_eq!(back.color_theme, ColorTheme::Light);
     }
 
     /// A settings file written by an older build must not wipe the user's
@@ -188,6 +189,7 @@ mod tests {
         // "automatic", not "pinned to nothing".
         assert_eq!(partial.device, None);
         assert!(partial.known_devices.is_empty());
+        assert_eq!(partial.color_theme, ColorTheme::Dark);
 
         assert!(serde_json::from_str::<Settings>("not json").is_err());
     }

@@ -610,7 +610,8 @@ impl eframe::App for App {
                         self.engine.send(Cmd::SetRunning(!running));
                     }
                     // Theme switcher
-                    let resp = egui::ComboBox::from_label("Theme")
+                    let previous_theme = self.settings.color_theme;
+                    egui::ComboBox::from_label("Theme")
                         .selected_text(self.settings.color_theme.to_string())
                         .show_ui(ui, |ui| {
                             for theme in ColorTheme::iter() {
@@ -622,7 +623,7 @@ impl eframe::App for App {
                             }
                         });
                     ui.add_space(16.0);
-                    if resp.inner == Some(()) {
+                    if self.settings.color_theme != previous_theme {
                         theme::set_current(self.settings.color_theme);
                         theme::current().apply(ui.ctx());
                         self.settings.save();
