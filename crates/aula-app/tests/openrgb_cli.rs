@@ -120,12 +120,29 @@ fn serve(mut stream: TcpStream, description: &[u8], allow_writes: bool) -> usize
 }
 
 fn cli() -> Command {
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_keylux"));
+    // Also exercise the release/archive binary without changing the fixtures.
+    let binary = std::env::var_os("KEYLUX_TEST_BINARY")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| env!("CARGO_BIN_EXE_keylux").into());
+    let mut cmd = Command::new(&binary);
+    if std::env::var_os("KEYLUX_TEST_BINARY").is_some() {
+        cmd.current_dir(binary.parent().unwrap());
+    }
     // Use an empty settings directory so the user's pinned hardware cannot
     // change test selection. These commands never save preferences.
     let empty = std::env::temp_dir().join(format!("keylux-sdk-cli-{}", std::process::id()));
     cmd.env("APPDATA", &empty).env("XDG_CONFIG_HOME", empty);
     cmd
+}
+
+#[test]
+fn cli_reports_the_build_version() {
+    let result = cli().arg("--version").output().unwrap();
+    assert!(result.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout).trim(),
+        format!("keylux {}", env!("CARGO_PKG_VERSION"))
+    );
 }
 
 #[test]
