@@ -509,7 +509,7 @@ fn run(
                     .unwrap_or(true))
         {
             last_foreground_poll = Some(Instant::now());
-            let foreground = if restore_default {
+            let foreground: Option<String> = if restore_default {
                 None
             } else {
                 match foreground_detector.poll() {
