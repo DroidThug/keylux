@@ -2,13 +2,14 @@
 
 use eframe::egui;
 
-use aula_effects::{ParamKind, Params, Value};
+use aula_effects::{ParamKind, ParamSpec, Params, Value};
 use aula_protocol::{Link, Rgb};
 use strum::IntoEnumIterator;
 
 use crate::board;
 use crate::editor::{self, Editor};
 use crate::engine::{Cmd, DeviceStatus, Engine};
+use crate::profiles::{self, AppProfile, LightingPreset};
 use crate::settings::{CloseAction, ColorTheme, Settings};
 use crate::theme;
 use crate::tray::{Tray, TrayAction};
@@ -18,6 +19,7 @@ use crate::window_ctl::WindowRef;
 enum Tab {
     Play,
     Create,
+    Apps,
     Settings,
 }
 
@@ -27,6 +29,7 @@ pub struct App {
     /// UI and engine can never drift apart.
     params: Params,
     selected: usize,
+    selection_revision: u64,
     effects_dir: std::path::PathBuf,
     anim_dir: std::path::PathBuf,
     tab: Tab,
@@ -36,6 +39,7 @@ pub struct App {
     /// True while the editor is streaming its preview to the keyboard, so we
     /// know to hand control back to the effect engine when that stops.
     live_active: bool,
+    last_device_target: Option<String>,
 
     settings: Settings,
     /// `None` when the tray could not be created. Everything that hides the
@@ -65,8 +69,10 @@ impl App {
         let ctx = cc.egui_ctx.clone();
         let engine = Engine::spawn(
             effects_dir.clone(),
-            settings.pinned_device(),
+            settings.target(),
             settings.allow_list(),
+            settings.endpoint(),
+            settings.app_lighting.clone(),
             move || ctx.request_repaint(),
         );
         let anim_dir = effects_dir
@@ -109,6 +115,7 @@ impl App {
             engine,
             params: Params::default(),
             selected: usize::MAX, // forces a sync on the first frame
+            selection_revision: u64::MAX,
             effects_dir,
             anim_dir,
             tab: Tab::Play,
@@ -116,6 +123,7 @@ impl App {
             last_tick: std::time::Instant::now(),
             notice: None,
             live_active: false,
+            last_device_target: None,
 
             settings,
             tray,
@@ -295,9 +303,8 @@ impl App {
                 // device will silently clamp reads as a bug.
                 let ceiling = self.engine.shared.lock().unwrap().max_fps_ceiling.max(1);
                 let mut fps = self.settings.max_fps.clamp(1, ceiling);
-                let lo = 4.min(ceiling);
                 let resp = ui
-                    .add(egui::Slider::new(&mut fps, lo..=ceiling).text("Frame rate"))
+                    .add(egui::Slider::new(&mut fps, 1..=ceiling).text("Frame rate"))
                     .on_hover_text(
                         "Lower this if the keyboard misses keypresses or repeats them.\n\
                      Lighting traffic and key scanning share the same processor.",
@@ -311,7 +318,7 @@ impl App {
                 if resp.drag_stopped() || (resp.changed() && !resp.dragged()) {
                     self.settings.save();
                 }
-                ui.weak("Unchanged frames are not resent, so a still effect uses no bandwidth.");
+                ui.weak("Unchanged colors skip repeated lighting writes.");
             });
     }
 
@@ -323,14 +330,14 @@ impl App {
     fn device_picker_ui(&mut self, ui: &mut egui::Ui) {
         let (devices, pinned, scanning) = {
             let s = self.engine.shared.lock().unwrap();
-            (s.devices.clone(), s.pinned, s.scanning)
+            (s.devices.clone(), s.pinned.clone(), s.scanning)
         };
 
-        let current = match pinned {
+        let current = match &pinned {
             None => "Automatic (wired preferred)".to_string(),
             Some(id) => devices
                 .iter()
-                .find(|d| d.id == id)
+                .find(|d| &d.id == id)
                 .map(|d| d.label.clone())
                 .unwrap_or_else(|| id.to_string()),
         };
@@ -353,9 +360,12 @@ impl App {
                         if !d.present {
                             label.push_str("  (not plugged in)");
                         }
-                        if ui.selectable_label(pinned == Some(d.id), label).clicked() {
-                            self.engine.send(Cmd::SelectDevice(Some(d.id)));
-                            self.settings.remember_device(d.id);
+                        if ui
+                            .selectable_label(pinned.as_ref() == Some(&d.id), label)
+                            .clicked()
+                        {
+                            self.engine.send(Cmd::SelectDevice(Some(d.id.clone())));
+                            self.settings.remember_target(d.id.clone());
                             self.settings.save();
                         }
                     }
@@ -366,6 +376,9 @@ impl App {
         });
 
         ui.horizontal(|ui| {
+            if ui.button("Rescan keyboards").clicked() {
+                self.engine.send(Cmd::ScanDevices { deep: false });
+            }
             if ui
                 .button("🔍 Scan for receivers")
                 .on_hover_text(
@@ -378,6 +391,41 @@ impl App {
                 self.engine.send(Cmd::ScanDevices { deep: true });
             }
         });
+
+        ui.separator();
+        if ui
+            .checkbox(
+                &mut self.settings.openrgb_enabled,
+                "Enable OpenRGB keyboards",
+            )
+            .changed()
+        {
+            self.engine
+                .send(Cmd::ConfigureOpenRgb(self.settings.endpoint()));
+            self.settings.save();
+        }
+        if self.settings.openrgb_enabled {
+            ui.horizontal(|ui| {
+                ui.label("SDK address");
+                ui.text_edit_singleline(&mut self.settings.openrgb_endpoint);
+                if ui.button("Apply").clicked() {
+                    self.engine
+                        .send(Cmd::ConfigureOpenRgb(self.settings.endpoint()));
+                    self.settings.save();
+                }
+            });
+            ui.weak("Start the SDK server in OpenRGB. Select a keyboard above; keylux supplies the effects.");
+        }
+        let warnings = self
+            .engine
+            .shared
+            .lock()
+            .unwrap()
+            .discovery_warnings
+            .clone();
+        for warning in warnings {
+            ui.colored_label(theme::current().warning, warning);
+        }
 
         // The side switch on the keyboard, not this picker, decides which link
         // is actually driving the LEDs. Without this note, pinning the dongle
@@ -450,6 +498,187 @@ impl App {
                     self.settings.save();
                 }
             });
+    }
+
+    fn app_profiles_ui(&mut self, ui: &mut egui::Ui) {
+        ui.heading("Application lighting");
+        ui.label("Switch lighting when you focus a game, editor, or another application.");
+        ui.weak("The first matching enabled profile wins. Switching continues in the tray.");
+        if !profiles::supported() {
+            ui.colored_label(
+                theme::current().warning,
+                "Automatic detection needs Windows or a Linux X11 session. Wayland and macOS are not supported.",
+            );
+        }
+        let (effects, status) = {
+            let state = self.engine.shared.lock().unwrap();
+            (state.effects.clone(), state.profile_status.clone())
+        };
+        let current = effects
+            .get(self.selected)
+            .map(|effect| LightingPreset::capture(effect.meta.id.clone(), &self.params));
+        let mut dirty = ui
+            .add_enabled(
+                profiles::supported(),
+                egui::Checkbox::new(
+                    &mut self.settings.app_lighting.enabled,
+                    "Switch automatically",
+                ),
+            )
+            .changed();
+        if self.settings.app_lighting.enabled {
+            if let Some(app) = &status.application {
+                ui.weak(format!("Last active application: {app}"));
+            }
+            ui.label(format!(
+                "Lighting: {}",
+                status.active.as_deref().unwrap_or("Default")
+            ));
+            if let Some(warning) = status.warning {
+                ui.colored_label(theme::current().warning, warning);
+            }
+        }
+        ui.weak("Lighting stays selected while you edit in keylux. Pause and editor previews take priority.");
+        ui.add_space(8.0);
+
+        egui::CollapsingHeader::new("Default lighting")
+            .default_open(true)
+            .show(ui, |ui| {
+                ui.weak("Used when no application matches, or when automatic switching is off.");
+                ui.push_id("default-preset", |ui| {
+                    dirty |= preset_ui(ui, &mut self.settings.app_lighting.default, &effects);
+                });
+                if ui
+                    .add_enabled(
+                        current.is_some(),
+                        egui::Button::new("Use current lighting as default"),
+                    )
+                    .clicked()
+                {
+                    self.settings.app_lighting.default = current.clone().unwrap();
+                    dirty = true;
+                }
+            });
+
+        ui.add_space(8.0);
+        let mut remove = None;
+        let mut move_profile = None;
+        let count = self.settings.app_lighting.profiles.len();
+        for (index, profile) in self.settings.app_lighting.profiles.iter_mut().enumerate() {
+            ui.push_id(index, |ui| {
+                egui::CollapsingHeader::new(format!("{}. {}", index + 1, profile.name))
+                    .id_salt("profile")
+                    .default_open(true)
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            dirty |= ui.checkbox(&mut profile.enabled, "Enabled").changed();
+                            if ui
+                                .add_enabled(index > 0, egui::Button::new("Move up"))
+                                .clicked()
+                            {
+                                move_profile = Some((index, index - 1));
+                            }
+                            if ui
+                                .add_enabled(index + 1 < count, egui::Button::new("Move down"))
+                                .clicked()
+                            {
+                                move_profile = Some((index, index + 1));
+                            }
+                            if ui.button("Delete").clicked() {
+                                remove = Some(index);
+                            }
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("Name");
+                            dirty |= ui.text_edit_singleline(&mut profile.name).changed();
+                        });
+                        ui.label(if cfg!(target_os = "linux") {
+                            "X11 application classes (WM_CLASS), separated by commas"
+                        } else {
+                            "Executable names or full paths, separated by commas"
+                        });
+                        dirty |= ui
+                            .add(
+                                egui::TextEdit::singleline(&mut profile.applications)
+                                    .hint_text(if cfg!(target_os = "linux") {
+                                        "Code, Firefox"
+                                    } else {
+                                        "Code.exe, cursor.exe"
+                                    })
+                                    .desired_width(f32::INFINITY),
+                            )
+                            .changed();
+                        if profile
+                            .applications
+                            .split(',')
+                            .all(|app| app.trim().is_empty())
+                        {
+                            ui.colored_label(
+                                theme::current().warning,
+                                "Add an application to activate this profile.",
+                            );
+                        }
+                        if cfg!(target_os = "windows") && ui.button("Choose application…").clicked()
+                        {
+                            if let Some(path) = rfd::FileDialog::new()
+                                .add_filter("Application", &["exe"])
+                                .set_title("Choose an application's executable")
+                                .pick_file()
+                            {
+                                let path = path.to_string_lossy();
+                                if !profile.applications.trim().is_empty() {
+                                    profile.applications.push_str(", ");
+                                }
+                                profile.applications.push_str(&path);
+                                dirty = true;
+                            }
+                        }
+                        if cfg!(target_os = "linux") {
+                            if let Some(app) = &status.application {
+                                if ui.button(format!("Add last active app: {app}")).clicked() {
+                                    if !profile.applications.trim().is_empty() {
+                                        profile.applications.push_str(", ");
+                                    }
+                                    profile.applications.push_str(app);
+                                    dirty = true;
+                                }
+                            }
+                        }
+                        dirty |= preset_ui(ui, &mut profile.lighting, &effects);
+                        if ui
+                            .add_enabled(
+                                current.is_some(),
+                                egui::Button::new("Use current lighting for this profile"),
+                            )
+                            .clicked()
+                        {
+                            profile.lighting = current.clone().unwrap();
+                            dirty = true;
+                        }
+                    });
+            });
+        }
+        if let Some(index) = remove {
+            self.settings.app_lighting.profiles.remove(index);
+            dirty = true;
+        } else if let Some((from, to)) = move_profile {
+            self.settings.app_lighting.profiles.swap(from, to);
+            dirty = true;
+        }
+        if ui.button("Add application profile").clicked() {
+            self.settings.app_lighting.profiles.push(AppProfile {
+                name: format!("Profile {}", count + 1),
+                lighting: current.unwrap_or_default(),
+                ..Default::default()
+            });
+            dirty = true;
+        }
+        if dirty {
+            self.settings.save();
+            self.engine.send(Cmd::ConfigureAppLighting(
+                self.settings.app_lighting.clone(),
+            ));
+        }
     }
 
     /// Import a GIF, image or folder of frames as an animation.
@@ -533,6 +762,9 @@ impl eframe::App for App {
             frames_sent,
             script_error,
             link,
+            engine_params,
+            selection_revision,
+            profile_status,
         ) = {
             let s = self.engine.shared.lock().unwrap();
             (
@@ -547,9 +779,25 @@ impl eframe::App for App {
                 s.frames_sent,
                 s.script_error.clone(),
                 s.link,
+                s.params.clone(),
+                s.selection_revision,
+                s.profile_status.clone(),
             )
         };
         let wireless = link == Some(Link::Dongle);
+        let target = match &status {
+            DeviceStatus::Connected { id, .. } => Some(id.clone()),
+            _ => None,
+        };
+        if target != self.last_device_target {
+            if let Some(ed) = self.editor.as_mut() {
+                ed.live = false;
+            }
+            self.engine.send(Cmd::LivePreview(None));
+            self.live_active = false;
+            self.last_device_target = target;
+        }
+        let can_save = matches!(&status, DeviceStatus::Connected { can_save: true, .. });
 
         let status_line = match &status {
             DeviceStatus::Connected { name, .. } => name.clone(),
@@ -560,18 +808,19 @@ impl eframe::App for App {
         self.close_dialog(ctx, running);
 
         // First frame, or the engine changed selection (e.g. after a rescan).
-        if self.selected == usize::MAX || self.selected != engine_sel {
+        if self.selected == usize::MAX || self.selection_revision != selection_revision {
             self.selected = engine_sel.min(effects.len().saturating_sub(1));
-            if let Some(e) = effects.get(self.selected) {
-                self.params = Params::from_specs(&e.meta.params);
-            }
+            self.params = engine_params;
+            self.selection_revision = selection_revision;
         }
 
         let pal = theme::current();
         egui::TopBottomPanel::top("status").show(ctx, |ui| {
             ui.horizontal(|ui| {
                 match &status {
-                    DeviceStatus::Connected { name, .. } => {
+                    DeviceStatus::Connected {
+                        name, has_matrix, ..
+                    } => {
                         status_dot(ui, pal.success);
                         ui.label(egui::RichText::new(name).strong());
                         if let Some(l) = link {
@@ -579,6 +828,9 @@ impl eframe::App for App {
                         }
                         ui.label(format!("{fps:.0} FPS"));
                         ui.weak(format!("{frames_sent} frames"));
+                        if !has_matrix {
+                            ui.weak("LED grid (no physical map from OpenRGB)");
+                        }
                     }
                     // Amber, not red: the app is doing exactly what it was
                     // told. The one-click way out matters more than the
@@ -609,7 +861,6 @@ impl eframe::App for App {
                     if ui.button(label).clicked() {
                         self.engine.send(Cmd::SetRunning(!running));
                     }
-                    // Theme switcher
                     let previous_theme = self.settings.color_theme;
                     egui::ComboBox::from_label("Theme")
                         .selected_text(self.settings.color_theme.to_string())
@@ -716,7 +967,7 @@ impl eframe::App for App {
                                 self.selected = i;
                                 self.params = Params::from_specs(&e.meta.params);
                                 self.engine.send(Cmd::SelectEffect(i));
-                                self.engine.send(Cmd::SetParams(self.params.clone()));
+
                             }
                         }
                     }
@@ -783,9 +1034,16 @@ impl eframe::App for App {
                     }
                 }
                 ui.selectable_value(&mut self.tab, Tab::Settings, "⚙ Settings");
+                ui.selectable_value(&mut self.tab, Tab::Apps, "Apps");
             });
             ui.separator();
 
+            if self.settings.app_lighting.enabled && self.tab == Tab::Play {
+                ui.weak(format!("Application lighting: {}", profile_status.active.as_deref().unwrap_or("Default")));
+                if let Some(warning) = &profile_status.warning {
+                    ui.colored_label(pal.warning, warning);
+                }
+            }
             // Leaving the editor (or closing its live toggle) hands the board
             // back to the effect engine.
             let editor_live =
@@ -793,6 +1051,11 @@ impl eframe::App for App {
             if !editor_live && self.live_active {
                 self.engine.send(Cmd::LivePreview(None));
                 self.live_active = false;
+            }
+
+            if self.tab == Tab::Apps {
+                egui::ScrollArea::vertical().show(ui, |ui| self.app_profiles_ui(ui));
+                return;
             }
 
             if self.tab == Tab::Settings {
@@ -806,13 +1069,35 @@ impl eframe::App for App {
                 let dt = self.last_tick.elapsed().as_secs_f32();
                 self.last_tick = std::time::Instant::now();
                 let anim_dir = self.anim_dir.clone();
+                let saved = self.editor.as_ref().map_or(true, |ed| !ed.dirty);
+                if ui.add_enabled(saved, egui::Button::new("New composition for this keyboard"))
+                    .on_disabled_hover_text("Save your current changes before starting a new composition.")
+                    .clicked() {
+                    self.engine.send(Cmd::LivePreview(None));
+                    self.live_active = false;
+                    self.editor = Some(Editor::new(frame.len().max(1)));
+                }
                 if let Some(ed) = self.editor.as_mut() {
                     ed.tick(dt);
-                    editor::show(ui, ed, &layout, &anim_dir);
+                    let matching_size = ed.comp.leds == frame.len();
+                    let can_stream = matching_size && matches!(&status, DeviceStatus::Connected { .. });
+                    if !can_stream {
+                        ed.live = false;
+                        if self.live_active {
+                            self.engine.send(Cmd::LivePreview(None));
+                            self.live_active = false;
+                        }
+                    }
+                    if !matching_size {
+                        ui.colored_label(pal.warning, format!("This composition has {} LEDs; the keyboard has {}. Create a new composition for this keyboard. Your existing work is preserved.", ed.comp.leds, frame.len()));
+                    }
+                    editor::show(ui, ed, &layout, &anim_dir, can_save && matching_size, can_stream);
                     if ed.frame_requested {
                         ed.frame_requested = false;
                         let f = ed.preview_frame(ed.comp.leds, &layout);
-                        self.engine.send(Cmd::WriteToNvram(f));
+                        if let DeviceStatus::Connected { id, .. } = &status {
+                            self.engine.send(Cmd::WriteToNvram { target: id.clone(), frame: f });
+                        }
                     }
 
                     if let Some(result) =
@@ -824,7 +1109,9 @@ impl eframe::App for App {
                     // is on, so the keyboard follows the brush.
                     if ed.live {
                         let f = ed.preview_frame(ed.comp.leds, &layout);
-                        self.engine.send(Cmd::LivePreview(Some(f)));
+                        if let DeviceStatus::Connected { id, .. } = &status {
+                            self.engine.send(Cmd::LivePreview(Some((id.clone(), f))));
+                        }
                         self.live_active = true;
                     }
                 }
@@ -893,78 +1180,14 @@ impl eframe::App for App {
             }
             ui.add_space(4.0);
 
-            let mut changed = false;
-            egui::Grid::new("params")
-                .num_columns(2)
-                .spacing([12.0, 8.0])
-                .show(ui, |ui| {
-                    for spec in &effect.meta.params {
-                        ui.label(&spec.label);
-                        match &spec.kind {
-                            ParamKind::Float { min, max, default } => {
-                                let mut v = self.params.float(&spec.id, *default);
-                                if ui.add(egui::Slider::new(&mut v, *min..=*max)).changed() {
-                                    self.params.set(&spec.id, Value::Float(v));
-                                    changed = true;
-                                }
-                            }
-                            ParamKind::Int { min, max, default } => {
-                                let mut v = self.params.int(&spec.id, *default);
-                                if ui.add(egui::Slider::new(&mut v, *min..=*max)).changed() {
-                                    self.params.set(&spec.id, Value::Int(v));
-                                    changed = true;
-                                }
-                            }
-                            ParamKind::Bool { default } => {
-                                let mut v = self.params.bool(&spec.id, *default);
-                                if ui.checkbox(&mut v, "").changed() {
-                                    self.params.set(&spec.id, Value::Bool(v));
-                                    changed = true;
-                                }
-                            }
-                            ParamKind::Color { default } => {
-                                let c = self.params.color(&spec.id, *default);
-                                let mut rgb = [c.r, c.g, c.b];
-                                if ui.color_edit_button_srgb(&mut rgb).changed() {
-                                    self.params.set(
-                                        &spec.id,
-                                        Value::Color(Rgb::new(rgb[0], rgb[1], rgb[2])),
-                                    );
-                                    changed = true;
-                                }
-                            }
-                            ParamKind::Text { default } => {
-                                let mut v = self.params.text(&spec.id, default);
-                                if ui.text_edit_singleline(&mut v).changed() {
-                                    self.params.set(&spec.id, Value::Text(v));
-                                    changed = true;
-                                }
-                            }
-                            ParamKind::Choice { options, default } => {
-                                let cur = self.params.int(&spec.id, *default as i64) as usize;
-                                let text = options.get(cur).cloned().unwrap_or_default();
-                                egui::ComboBox::from_id_salt(&spec.id)
-                                    .selected_text(text)
-                                    .show_ui(ui, |ui| {
-                                        for (i, opt) in options.iter().enumerate() {
-                                            if ui.selectable_label(i == cur, opt).clicked() {
-                                                self.params.set(&spec.id, Value::Int(i as i64));
-                                                changed = true;
-                                            }
-                                        }
-                                    });
-                            }
-                        }
-                        ui.end_row();
-                    }
-                });
+            let changed = params_ui(ui, &effect.meta.params, &mut self.params);
 
             if effect.meta.params.is_empty() {
                 ui.weak("This effect has no parameters.");
             }
 
             if changed {
-                self.engine.send(Cmd::SetParams(self.params.clone()));
+                self.engine.send(Cmd::SetParams { revision: self.selection_revision, params: self.params.clone() });
             }
         });
     }
@@ -984,4 +1207,122 @@ fn short(s: &str, max: usize) -> String {
         let head: String = s.chars().take(max.saturating_sub(1)).collect();
         format!("{head}…")
     }
+}
+
+fn preset_ui(
+    ui: &mut egui::Ui,
+    preset: &mut LightingPreset,
+    effects: &[crate::engine::EffectInfo],
+) -> bool {
+    let mut changed = false;
+    let label = effects
+        .iter()
+        .find(|e| e.meta.id == preset.effect)
+        .map(|e| e.meta.name.as_str())
+        .unwrap_or(&preset.effect)
+        .to_owned();
+    ui.horizontal(|ui| {
+        ui.label("Effect");
+        egui::ComboBox::from_id_salt("preset-effect")
+            .selected_text(label)
+            .show_ui(ui, |ui| {
+                for effect in effects {
+                    if ui
+                        .selectable_label(preset.effect == effect.meta.id, &effect.meta.name)
+                        .clicked()
+                        && preset.effect != effect.meta.id
+                    {
+                        *preset = LightingPreset::capture(
+                            effect.meta.id.clone(),
+                            &Params::from_specs(&effect.meta.params),
+                        );
+                        changed = true;
+                    }
+                }
+            });
+    });
+    if let Some(effect) = effects.iter().find(|e| e.meta.id == preset.effect) {
+        let mut params = preset.restore(&effect.meta.params);
+        if params_ui(ui, &effect.meta.params, &mut params) {
+            *preset = LightingPreset::capture(preset.effect.clone(), &params);
+            changed = true;
+        }
+    } else {
+        ui.colored_label(
+            theme::current().warning,
+            "Effect unavailable. Choose another effect or restore its file.",
+        );
+    }
+    changed
+}
+
+fn params_ui(ui: &mut egui::Ui, specs: &[ParamSpec], params: &mut Params) -> bool {
+    let mut changed = false;
+    egui::Grid::new("params")
+        .num_columns(2)
+        .spacing([12.0, 8.0])
+        .show(ui, |ui| {
+            for spec in specs {
+                ui.label(&spec.label);
+                match &spec.kind {
+                    ParamKind::Float { min, max, default } => {
+                        let mut v = params.float(&spec.id, *default);
+                        if ui.add(egui::Slider::new(&mut v, *min..=*max)).changed() {
+                            params.set(&spec.id, Value::Float(v));
+                            changed = true;
+                        }
+                    }
+                    ParamKind::Int { min, max, default } => {
+                        let mut v = params.int(&spec.id, *default);
+                        if ui.add(egui::Slider::new(&mut v, *min..=*max)).changed() {
+                            params.set(&spec.id, Value::Int(v));
+                            changed = true;
+                        }
+                    }
+                    ParamKind::Bool { default } => {
+                        let mut v = params.bool(&spec.id, *default);
+                        if ui.checkbox(&mut v, "").changed() {
+                            params.set(&spec.id, Value::Bool(v));
+                            changed = true;
+                        }
+                    }
+                    ParamKind::Color { default } => {
+                        let c = params.color(&spec.id, *default);
+                        let mut rgb = [c.r, c.g, c.b];
+                        if ui.color_edit_button_srgb(&mut rgb).changed() {
+                            params.set(&spec.id, Value::Color(Rgb::new(rgb[0], rgb[1], rgb[2])));
+                            changed = true;
+                        }
+                    }
+                    ParamKind::Text { default } => {
+                        let mut v = params.text(&spec.id, default);
+                        if ui.text_edit_singleline(&mut v).changed() {
+                            params.set(&spec.id, Value::Text(v));
+                            changed = true;
+                        }
+                    }
+                    ParamKind::Choice { options, default } => {
+                        let cur = match params.get(&spec.id) {
+                            Some(Value::Choice(v)) => *v,
+                            Some(Value::Int(v)) => *v as usize,
+                            _ => *default,
+                        };
+                        let text = options.get(cur).cloned().unwrap_or_default();
+                        egui::ComboBox::from_id_salt(&spec.id)
+                            .selected_text(text)
+                            .show_ui(ui, |ui| {
+                                for (i, opt) in options.iter().enumerate() {
+                                    if ui.selectable_label(i == cur, opt).clicked() {
+                                        params.set(&spec.id, Value::Choice(i));
+                                        changed = true;
+                                    }
+                                }
+                            });
+                    }
+                }
+                ui.end_row();
+            }
+        });
+
+    changed
 }

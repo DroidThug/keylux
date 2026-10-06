@@ -358,9 +358,16 @@ impl Editor {
 }
 
 /// Draw the editor.
-pub fn show(ui: &mut egui::Ui, ed: &mut Editor, layout: &[KeyPos], anim_dir: &std::path::Path) {
+pub fn show(
+    ui: &mut egui::Ui,
+    ed: &mut Editor,
+    layout: &[KeyPos],
+    anim_dir: &std::path::Path,
+    can_save: bool,
+    can_stream: bool,
+) {
     handle_shortcuts(ui, ed);
-    top_bar(ui, ed, anim_dir);
+    top_bar(ui, ed, anim_dir, can_save, can_stream);
     ui.separator();
     layer_panel(ui, ed);
     ui.separator();
@@ -404,7 +411,13 @@ fn handle_shortcuts(ui: &egui::Ui, ed: &mut Editor) {
     }
 }
 
-fn top_bar(ui: &mut egui::Ui, ed: &mut Editor, anim_dir: &std::path::Path) {
+fn top_bar(
+    ui: &mut egui::Ui,
+    ed: &mut Editor,
+    anim_dir: &std::path::Path,
+    can_save: bool,
+    can_stream: bool,
+) {
     let pal = theme::current();
     // Name/file/save on one row, the live toggle on its own, so a narrow window
     // never overlaps the "Send to keyboard" button onto the Save controls.
@@ -426,13 +439,14 @@ fn top_bar(ui: &mut egui::Ui, ed: &mut Editor, anim_dir: &std::path::Path) {
         }
     });
     ui.horizontal(|ui| {
-        ui.toggle_value(&mut ed.live, "📡 Send to keyboard")
-            .on_hover_text(
-                "Stream the composited preview to the real keyboard as you edit.\n\
-                 Smoothest over the cable; the 2.4 GHz link updates slowly.",
-            );
+        ui.add_enabled_ui(can_stream, |ui| {
+            ui.toggle_value(&mut ed.live, "📡 Send to keyboard")
+                .on_hover_text("Stream the composited preview to the selected keyboard as you edit.");
+        }).response.on_disabled_hover_text("Connect a keyboard with the same LED count as this composition.");
 
-        if ui.button("💾 Write frame to NVRAM (permanent)").clicked() {
+        if ui.add_enabled(can_save, egui::Button::new("💾 Write frame to NVRAM (permanent)"))
+            .on_disabled_hover_text("Permanent storage is available only through the native AULA driver. Use live preview with OpenRGB.")
+            .clicked() {
             ed.frame_requested = true;
             ed.nvram_result = None;
         }

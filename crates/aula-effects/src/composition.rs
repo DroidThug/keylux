@@ -207,9 +207,10 @@ pub struct CompositeEffect {
     id: String,
     path: Option<PathBuf>,
     /// Baked keyframes for generator layers, parallel to `comp.layers`; `None`
-    /// for keyframe layers. Rebuilt when the layout width changes.
+    /// for keyframe layers. Rebuilt when geometry, LED order, or count changes.
     baked: Vec<Option<Animation>>,
-    baked_for: usize,
+    baked_layout: Vec<KeyPos>,
+    baked_leds: usize,
 }
 
 impl CompositeEffect {
@@ -220,7 +221,8 @@ impl CompositeEffect {
             id: id.into(),
             path: None,
             baked,
-            baked_for: 0,
+            baked_layout: Vec::new(),
+            baked_leds: 0,
         }
     }
 
@@ -245,9 +247,11 @@ impl CompositeEffect {
     }
 
     /// (Re)bake generator layers for the current layout if needed.
-    fn ensure_baked(&mut self, ctx: &RenderCtx) {
-        let len = ctx.layout.len();
-        if self.baked_for == len && self.baked.len() == self.comp.layers.len() {
+    fn ensure_baked(&mut self, ctx: &RenderCtx, leds: usize) {
+        if self.baked_layout == ctx.layout
+            && self.baked_leds == leds
+            && self.baked.len() == self.comp.layers.len()
+        {
             return;
         }
         self.baked = self
@@ -256,9 +260,8 @@ impl CompositeEffect {
             .iter()
             .map(|layer| match &layer.content {
                 LayerContent::Generator(params) => {
-                    let kfs =
-                        generators::bake(params, self.comp.leds, ctx.layout, self.comp.duration);
-                    let mut a = Animation::new(&layer.name, self.comp.leds);
+                    let kfs = generators::bake(params, leds, ctx.layout, self.comp.duration);
+                    let mut a = Animation::new(&layer.name, leds);
                     a.duration = self.comp.duration;
                     a.loops = self.comp.loops;
                     a.interpolate = true;
@@ -269,7 +272,8 @@ impl CompositeEffect {
                 LayerContent::Keyframes(_) => None,
             })
             .collect();
-        self.baked_for = len;
+        self.baked_layout = ctx.layout.to_vec();
+        self.baked_leds = leds;
     }
 }
 
@@ -291,7 +295,7 @@ impl Effect for CompositeEffect {
     }
 
     fn render(&mut self, ctx: &RenderCtx, out: &mut Frame) {
-        self.ensure_baked(ctx);
+        self.ensure_baked(ctx, out.len());
 
         let speed = ctx.params.float("speed", 1.0);
         let brightness = ctx.params.float("brightness", 1.0);
@@ -454,5 +458,59 @@ mod tests {
         comp.save(&path).unwrap();
         let back = Composition::load(&path).unwrap();
         assert_eq!(comp, back);
+    }
+
+    #[test]
+    fn switching_same_size_boards_rebakes_geometry_and_new_led_counts() {
+        let mut comp = Composition::new("portable generator", 2);
+        comp.layers = vec![Layer::generator(
+            "rainbow",
+            GenParams {
+                kind: Generator::Rainbow,
+                ..Default::default()
+            },
+        )];
+        let mut fx = CompositeEffect::new(comp, "portable");
+        let params = Params::from_specs(&fx.meta().params);
+        let a = vec![
+            KeyPos {
+                name: "A".into(),
+                row: 0,
+                x: 0.5,
+                w: 1.0,
+                led: 0,
+            },
+            KeyPos {
+                name: "B".into(),
+                row: 0,
+                x: 2.5,
+                w: 1.0,
+                led: 1,
+            },
+        ];
+        let mut b = a.clone();
+        b[0].led = 1;
+        b[1].led = 0;
+        let render = |fx: &mut CompositeEffect, layout: &[KeyPos], leds| {
+            let ctx = RenderCtx {
+                t: 0.0,
+                layout,
+                max_x: 2.5,
+                max_row: 0.0,
+                params: &params,
+            };
+            let mut frame = Frame::black(leds);
+            fx.render(&ctx, &mut frame);
+            frame
+        };
+        let first = render(&mut fx, &a, 2);
+        let second = render(&mut fx, &b, 2);
+        assert_ne!(first.get(0), first.get(1));
+        assert_eq!(first.get(0), second.get(1));
+        assert_eq!(first.get(1), second.get(0));
+        b[1].led = 5;
+        let expanded = render(&mut fx, &b, 6);
+        assert_eq!(expanded.get(5), first.get(1));
+        assert!(!expanded.get(5).is_black());
     }
 }
