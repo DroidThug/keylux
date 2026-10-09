@@ -1,0 +1,31 @@
+name: macOS build
+
+on:
+  workflow_dispatch:
+
+jobs:
+  package:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build release
+        run: cargo build --release -p aula-app
+      - name: Smoke test
+        run: |
+          ./target/release/keylux --version
+          ./target/release/keylux list || true
+      - name: Stage package
+        run: |
+          stage=keylux-macos-arm64
+          mkdir -p "$stage/animations"
+          cp target/release/keylux "$stage/"
+          cp -r effects "$stage/effects"
+          cp -r docs "$stage/docs"
+          touch "$stage/animations/.gitkeep"
+          cp README.md LICENSE-MIT LICENSE-APACHE "$stage/"
+          tar -czf keylux-macos-arm64.tar.gz -C "$stage" .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: keylux-macos-arm64
+          path: keylux-macos-arm64.tar.gz
